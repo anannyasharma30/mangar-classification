@@ -1,0 +1,87 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var table = ee.FeatureCollection("projects/ee-anannyabackup/assets/training_points_mangar");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/**
+ * Function to mask clouds using the Sentinel-2 QA band
+ * @param {ee.Image} image Sentinel-2 image
+ * @return {ee.Image} cloud masked Sentinel-2 image
+ */
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  return image.updateMask(mask).divide(10000);
+}
+
+var dataset = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterDate('2023-12-01', '2023-12-30')
+                  // Pre-filter to get less cloudy granules.
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20))
+                  .map(maskS2clouds)
+                  .select('B2', 'B3', 'B4', 'B8');
+
+var visualization = {
+  min: 0.1,
+  max: 0.3,
+  bands: ['B8', 'B4', 'B3'],
+};
+
+Map.setCenter(77.18, 28.38, 12);
+
+// Define a region in which to generate a sample of the input.
+var region = ee.Geometry.Rectangle(77.13, 28.35, 77.24, 28.43);
+
+// Clip the image to the region of interest.
+var clippedImage = dataset.mean().clip(region);
+
+Map.addLayer(region);
+Map.addLayer(clippedImage, visualization, 'Clipped RGB');
+
+var bands = ['B2', 'B3', 'B4', 'B8'];
+var points = ee.FeatureCollection(table);
+var label = 'f_cover';
+
+var training = clippedImage.select(bands).sampleRegions({
+ 'collection' : points,
+ 'properties' : [label],
+ 'scale': 30
+});
+
+//randomforest
+var classifier = ee.Classifier.smileRandomForest({
+  numberOfTrees : 500,
+  variablesPerSplit : 4,
+  bagFraction : 0.3
+  }).train(training, label, bands);
+
+
+// Make the training dataset.
+var training = clippedImage.sample({
+  region: region,
+  scale: 30,
+  numPixels: 5000
+});
+
+// Instantiate the clusterer and train it.
+var clusterer = ee.Clusterer.wekaKMeans(7).train(training);
+
+// Cluster the input using the trained clusterer.
+var result = clippedImage.cluster(clusterer);
+
+// Display the clusters with random colors.
+Map.addLayer(result.randomVisualizer(), {}, 'clusters');
+
+// Export the image, specifying scale and region.
+Export.image.toDrive({
+  image: result,
+  description: 'Mangar_ForestCover_RF_2',
+  scale: 30,
+  region: region
+});
